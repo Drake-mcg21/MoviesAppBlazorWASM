@@ -1,7 +1,8 @@
 ﻿@page "/movies"
 @using MoviesApp.Client.Services
 @using MoviesApp.Shared.DTOs
-@inject MovieService MovieService
+@inject IMovieService MovieService
+@inject NotificationService NotificationService
 @inject NavigationManager Navigation
 @inject IJSRuntime JSRuntime
 
@@ -114,7 +115,12 @@
                 var success = await MovieService.DeleteMovieAsync(id);
                 if (success)
                 {
+                    NotificationService.Show("Movie deleted", NotificationLevel.Success);
                     await LoadMovies();
+                }
+                else
+                {
+                    NotificationService.Show("Failed to delete movie", NotificationLevel.Error);
                 }
             }
         }

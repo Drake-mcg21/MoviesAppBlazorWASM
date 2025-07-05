@@ -2,7 +2,8 @@
 @using MoviesApp.Client.Services
 @using MoviesApp.Shared.DTOs
 @using MoviesApp.Shared.Models
-@inject MovieService MovieService
+@inject IMovieService MovieService
+@inject NotificationService NotificationService
 @inject NavigationManager Navigation
 
 <PageTitle>Add Movie</PageTitle>
@@ -82,7 +83,13 @@
 
         if (success)
         {
+            NotificationService.Show("Movie added successfully", NotificationLevel.Success);
+            await Task.Delay(500);
             Navigation.NavigateTo("/movies");
+        }
+        else
+        {
+            NotificationService.Show("Failed to add movie", NotificationLevel.Error);
         }
 
         isSubmitting = false;

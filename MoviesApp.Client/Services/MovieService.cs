@@ -3,7 +3,7 @@ using MoviesApp.Shared.DTOs;
 
 namespace MoviesApp.Client.Services
 {
-    public class MovieService
+    public class MovieService : IMovieService
     {
         private readonly HttpClient _httpClient;
         private const string ApiEndpoint = "api/movies";

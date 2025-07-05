@@ -2,7 +2,8 @@
 @using MoviesApp.Client.Services
 @using MoviesApp.Shared.DTOs
 @using MoviesApp.Shared.Models
-@inject MovieService MovieService
+@inject IMovieService MovieService
+@inject NotificationService NotificationService
 @inject NavigationManager Navigation
 
 <PageTitle>Edit Movie</PageTitle>
@@ -133,7 +134,13 @@ else
 
         if (success)
         {
+            NotificationService.Show("Movie updated successfully", NotificationLevel.Success);
+            await Task.Delay(500);
             Navigation.NavigateTo("/movies");
+        }
+        else
+        {
+            NotificationService.Show("Failed to update movie", NotificationLevel.Error);
         }
 
         isSubmitting = false;

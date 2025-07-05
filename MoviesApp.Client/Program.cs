@@ -13,6 +13,7 @@ builder.Services.AddScoped(sp => new HttpClient
     BaseAddress = new Uri("https://localhost:7002/") // Your API URL
 });
 
-builder.Services.AddScoped<MovieService>();
+builder.Services.AddScoped<IMovieService, MovieService>();
+builder.Services.AddScoped<NotificationService>();
 
 await builder.Build().RunAsync();

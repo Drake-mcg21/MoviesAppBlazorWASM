@@ -1,0 +1,55 @@
+@inject NotificationService NotificationService
+
+@if (!string.IsNullOrEmpty(message))
+{
+    <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 2000;">
+        <div class="toast show @cssClass" role="alert">
+            <div class="toast-body">
+                @message
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private string? message;
+    private string cssClass = string.Empty;
+    private System.Timers.Timer? timer;
+
+    protected override void OnInitialized()
+    {
+        NotificationService.OnNotify += Show;
+    }
+
+    private void Show(string message, NotificationLevel level)
+    {
+        this.message = message;
+        cssClass = level switch
+        {
+            NotificationLevel.Success => "bg-success text-white",
+            NotificationLevel.Error => "bg-danger text-white",
+            NotificationLevel.Warning => "bg-warning text-dark",
+            _ => "bg-info text-white"
+        };
+
+        timer?.Stop();
+        timer = new System.Timers.Timer(3000);
+        timer.Elapsed += Hide;
+        timer.AutoReset = false;
+        timer.Start();
+        StateHasChanged();
+    }
+
+    private void Hide(object? sender, System.Timers.ElapsedEventArgs e)
+    {
+        message = null;
+        cssClass = string.Empty;
+        InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        NotificationService.OnNotify -= Show;
+        timer?.Dispose();
+    }
+}
