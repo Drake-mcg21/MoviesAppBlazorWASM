@@ -13,13 +13,17 @@ builder.Services.AddDbContext<MoviesDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 
 // Add CORS
+var allowedOrigins =
+    builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]?>() ??
+    new[] { "https://localhost:7074", "http://localhost:5195" };
+
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowBlazorClient", builder =>
+    options.AddPolicy("AllowBlazorClient", policyBuilder =>
     {
-        builder.WithOrigins("https://localhost:7001", "http://localhost:5000")
-               .AllowAnyMethod()
-               .AllowAnyHeader();
+        policyBuilder.WithOrigins(allowedOrigins)
+                     .AllowAnyMethod()
+                     .AllowAnyHeader();
     });
 });
 
