@@ -1,18 +1,95 @@
 ﻿@page "/counter"
+@using Microsoft.AspNetCore.SignalR.Client
+@using System.Text.Json
+@using Model;
+<PageTitle>Robots</PageTitle>
 
-<PageTitle>Counter</PageTitle>
+<h1>Robots</h1>
+<p>robots: @robots.Count</p>
 
-<h1>Counter</h1>
-
-<p role="status">Current count: @currentCount</p>
-
-<button class="btn btn-primary" @onclick="IncrementCount">Click me</button>
+<div class="map">
+    @foreach (var kvp in robots)
+    {
+        var p = kvp.Value;
+            <div @key="kvp.Key"
+                 class="robot"
+                 style="@StyleFor(p)"
+                 title="@kvp.Key.ToString()"></div>
+    }
+</div>
+<ul>
+    @foreach (var r in robots.Values)
+    {
+      <li>@r.RobotId — (@r.X, @r.Y) yaw=@r.Yaw</li>
+    }
+</ul>
 
 @code {
-    private int currentCount = 0;
+    private HubConnection? _hubConnection;
 
-    private void IncrementCount()
+
+    private static readonly JsonSerializerOptions JsonOpts = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
+    private readonly Dictionary<Guid, PositionDto> robots = new();
+
+    private const double Scale = 2;    
+    private const double OriginX = 300;
+    private const double OriginY = 300;
+
+    private string StyleFor(PositionDto p)
     {
-        currentCount++;
+        var x = OriginX + (p.X * Scale) - 10;   
+        var y = OriginY - (p.Y * Scale) - 5;   
+        return $"left:0;top:0;transform-origin:center;transform: translate({x}px, {y}px) rotate({-p.Yaw}rad);";
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+
+        _hubConnection = new HubConnectionBuilder()
+            .WithUrl("https://localhost:7052/robothub")
+            .WithAutomaticReconnect()
+            .Build();
+
+        _hubConnection.On<SignalREvent>("v1/robot/positions", PositionUpdate);
+        await _hubConnection.StartAsync();
+    }
+
+    private void PositionUpdate(SignalREvent evt)
+    {
+        try
+        {
+            if (evt.Type == EventType.All && evt.Payload.ValueKind == JsonValueKind.Array)
+            {
+                // Replace snapshot to avoid stale/duplicate entries
+                robots.Clear();
+
+                foreach (var el in evt.Payload.EnumerateArray())
+                {
+                    var p = el.Deserialize<PositionDto>(JsonOpts);
+                    if (p is not null) robots[p.RobotId] = p;
+                }
+            }
+            else if (evt.Type == EventType.Updated)
+            {
+                var p = evt.Payload.Deserialize<PositionDto>(JsonOpts);
+                if (p is not null) robots[p.RobotId] = p;
+            }
+
+            _ = InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine(ex);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hubConnection is not null)
+            await _hubConnection.DisposeAsync();
     }
 }

@@ -101,3 +101,22 @@ a, .btn-link {
 code {
     color: #c02d76;
 }
+.map {
+    position: relative;
+    width: 800px;
+    height: 600px;
+    border: 1px solid #ccc;
+    background: #f7f7f7;
+    overflow: hidden;
+}
+
+.robot {
+    position: absolute;
+    width: 20px;
+    height: 10px;
+    background: red; 
+    border: 1px solid black;
+    border-radius: 2px;
+    box-sizing: border-box;
+    transition: transform 0.2s linear; 
+}
