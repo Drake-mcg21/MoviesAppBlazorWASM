@@ -14,11 +14,13 @@ namespace MoviesApp.Server.Controllers
     {
         private readonly MoviesDbContext _context;
         private readonly IHubContext<MovieHub> _hub;
+        private readonly IEventPublisher _eventPublisher;
 
-        public MoviesController(MoviesDbContext context, IHubContext<MovieHub> hub)
+        public MoviesController(MoviesDbContext context, IHubContext<MovieHub> hub, IEventPublisher eventPublisher)
         {
             _context = context;
             _hub = hub;
+            _eventPublisher = eventPublisher;
         }
 
         [HttpGet]
@@ -82,17 +84,16 @@ namespace MoviesApp.Server.Controllers
                 ReleaseDate = movie.ReleaseDate,
                 BoxOfficeSales = movie.BoxOfficeSales
             };
-            await _hub.Clients.All.SendAsync("MovieCreated", new MovieDto
-            {
-                Id = movie.Id,
-                Title = movie.Title,
-                Genre = movie.Genre,
-                ReleaseDate = movie.ReleaseDate,
-                BoxOfficeSales = movie.BoxOfficeSales
-            });
+
+            // Publish event to RabbitMQ
+            await _eventPublisher.PublishAsync("MovieCreated", movieDto);
+
+            // Also send via SignalR
+            await _hub.Clients.All.SendAsync("MovieCreated", movieDto);
 
             return CreatedAtAction(nameof(GetMovie), new { id = movie.Id }, movieDto);
         }
+
         [HttpPut("{id}")]
         public async Task<IActionResult> UpdateMovie(int id, UpdateMovieDto updateMovieDto)
         {
@@ -130,6 +131,10 @@ namespace MoviesApp.Server.Controllers
                 BoxOfficeSales = movie.BoxOfficeSales
             };
 
+            // Publish event to RabbitMQ
+            await _eventPublisher.PublishAsync("MovieUpdated", movieDto);
+
+            // Also send via SignalR
             await _hub.Clients.All.SendAsync("MovieUpdated", movieDto);
 
             return NoContent();
@@ -147,7 +152,13 @@ namespace MoviesApp.Server.Controllers
 
             _context.Movies.Remove(movie);
             await _context.SaveChangesAsync();
+
+            // Publish event to RabbitMQ
+            await _eventPublisher.PublishAsync("MovieDeleted", new { Id = id });
+
+            // Also send via SignalR
             await _hub.Clients.All.SendAsync("MovieDeleted", id);
+
             return NoContent();
         }
 
