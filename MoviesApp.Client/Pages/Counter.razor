@@ -1,95 +1,306 @@
 ﻿@page "/counter"
 @using Microsoft.AspNetCore.SignalR.Client
-@using System.Text.Json
-@using Model;
+@using Microsoft.AspNetCore.Components.Web.Virtualization
+@using System.Threading.Channels
+@using Model
+@implements IAsyncDisposable
+
+@inject HttpClient Http
+
 <PageTitle>Robots</PageTitle>
 
 <h1>Robots</h1>
 <p>robots: @robots.Count</p>
+<p> Core System Status: Database Connection - @system?.DatabaseConnection, System Uptime - @system?.SystemUptime</p>
+<p> API System Status: Active Connections - @Apisystem?.ActiveClients.ToString(), System Uptime - @Apisystem?.SystemUptime</p>
+
+<ul>
+    @foreach (var m in missions.Values)
+    {
+        <li @key="m.id">Mission: @m.name, Status @m.status, AssignedRobot @m.assignedRobot Created @m.createdTime</li>
+    }
+</ul>
 
 <div class="map">
     @foreach (var kvp in robots)
     {
         var p = kvp.Value;
-            <div @key="kvp.Key"
-                 class="robot"
-                 style="@StyleFor(p)"
-                 title="@kvp.Key.ToString()"></div>
+        <div @key="kvp.Key"
+             class="robot"
+             style="@StyleFor(p)"
+             title="@kvp.Key.ToString()"></div>
     }
 </div>
+
 <ul>
     @foreach (var r in robots.Values)
     {
-      <li>@r.RobotId — (@r.X, @r.Y) yaw=@r.Yaw</li>
+        <li @key="r.RobotId">@r.RobotId — (@r.X, @r.Y) yaw=@r.Yaw</li>
     }
 </ul>
+
+<!-- Virtualized device list (renders only visible rows) -->
+<Virtualize Items="@deviceView" ItemSize="28" Context="d">
+    <DeviceRow @key="d.deviceId" Value="d" />
+</Virtualize>
 
 @code {
     private HubConnection? _hubConnection;
 
+    private IDisposable? _posSub;
+    private IDisposable? _sysSub;
+    private IDisposable? _sysApiSub;
+    private IDisposable? _devSub;
+    private IDisposable? _missionsSub;
 
-    private static readonly JsonSerializerOptions JsonOpts = new()
-        {
-            PropertyNameCaseInsensitive = true
-        };
+    private readonly Dictionary<Guid, PositionDto> robots  = new();
+    private readonly Dictionary<Guid, MissionDto> missions = new();
+    private CoreSystemStatusDto? system;
+    private APISystemStatusDto?  Apisystem;
 
-    private readonly Dictionary<Guid, PositionDto> robots = new();
+    // Devices (authoritative map) and snapshot for Virtualize
+    private readonly Dictionary<Guid, DeviceValueDto> devices = new(capacity: 1024);
+    private List<DeviceValueDto> deviceView = new(1024); // stable snapshot for Virtualize
 
-    private const double Scale = 2;    
+    // ---- High-rate device pipeline ----
+    private readonly Channel<SignalREvent<DeviceValueDto[]>> _deviceChan =
+        Channel.CreateUnbounded<SignalREvent<DeviceValueDto[]>>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+
+    private CancellationTokenSource? _cts;
+    private Task? _devicePumpTask;
+
+    // Snapshot tracking for devices
+    private Guid? _currentSnapshotBatchId;
+    private int   _snapshotExpectedItems;
+    private int   _snapshotReceivedItems;
+    private bool  _deviceSnapshotInProgress;
+
+    private const double Scale = 2;
     private const double OriginX = 300;
     private const double OriginY = 300;
 
     private string StyleFor(PositionDto p)
     {
-        var x = OriginX + (p.X * Scale) - 10;   
-        var y = OriginY - (p.Y * Scale) - 5;   
+        var x = OriginX + (p.X * Scale) - 10;
+        var y = OriginY - (p.Y * Scale) - 5;
         return $"left:0;top:0;transform-origin:center;transform: translate({x}px, {y}px) rotate({-p.Yaw}rad);";
     }
 
     protected override async Task OnInitializedAsync()
     {
+        _cts = new CancellationTokenSource();
 
         _hubConnection = new HubConnectionBuilder()
-            .WithUrl("https://localhost:7052/robothub")
+            .WithUrl("https://localhost:7052/nexia")
+            .AddMessagePackProtocol()             // binary, fast
             .WithAutomaticReconnect()
             .Build();
 
-        _hubConnection.On<SignalREvent>("v1/robot/positions", PositionUpdate);
+        _posSub      = _hubConnection.On<SignalREvent<PositionDto[]>>(TopicNames.V1RobotPositions, PositionBatch);
+        _sysSub      = _hubConnection.On<SignalREvent<CoreSystemStatusDto[]>>(TopicNames.V1CoreStatus, CoreSystemBatch);
+        _sysApiSub   = _hubConnection.On<SignalREvent<APISystemStatusDto[]>>(TopicNames.V1ApiStatus, ApiSystemBatch);
+        _devSub      = _hubConnection.On<SignalREvent<DeviceValueDto[]>>(TopicNames.V1Devices, e => _deviceChan.Writer.TryWrite(e)); // queue devices
+        _missionsSub = _hubConnection.On<SignalREvent<MissionDto[]>>(TopicNames.V1Missions, MissionBatch);
+
         await _hubConnection.StartAsync();
+
+        _hubConnection.Reconnected += async _ =>
+        {
+            await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1RobotPositions);
+            await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1CoreStatus);
+            await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1Devices);
+            await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1ApiStatus);
+            await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1Missions);
+        };
+
+        await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1RobotPositions);
+        await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1CoreStatus);
+        await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1Devices);
+        await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1ApiStatus);
+        await _hubConnection.InvokeAsync("Subscribe", TopicNames.V1Missions);
+
+        // Start the high-rate device pump (coalesces to ~30 fps)
+        _devicePumpTask = Task.Run(() => DevicePumpAsync(_cts.Token));
     }
 
-    private void PositionUpdate(SignalREvent evt)
+    // ---------- Coalesced device apply loop ----------
+    private async Task DevicePumpAsync(CancellationToken ct)
     {
+        // newest-per-id since last frame
+        var pending = new Dictionary<Guid, DeviceValueDto>(capacity: 1024);
+
+        // Apply ~30 times per second
+        using var frame = new PeriodicTimer(TimeSpan.FromMilliseconds(33));
+
         try
         {
-            if (evt.Type == EventType.All && evt.Payload.ValueKind == JsonValueKind.Array)
+            while (await frame.WaitForNextTickAsync(ct))
             {
-                // Replace snapshot to avoid stale/duplicate entries
-                robots.Clear();
-
-                foreach (var el in evt.Payload.EnumerateArray())
+                // Drain all queued device events for this frame
+                while (_deviceChan.Reader.TryRead(out var evt))
                 {
-                    var p = el.Deserialize<PositionDto>(JsonOpts);
-                    if (p is not null) robots[p.RobotId] = p;
-                }
-            }
-            else if (evt.Type == EventType.Updated)
-            {
-                var p = evt.Payload.Deserialize<PositionDto>(JsonOpts);
-                if (p is not null) robots[p.RobotId] = p;
-            }
+                    var items = evt.Payload ?? Array.Empty<DeviceValueDto>();
 
+                    if (evt.Type == EventType.All)
+                    {
+                        // New snapshot gate
+                        if (evt.BatchId != _currentSnapshotBatchId)
+                        {
+                            devices.Clear();
+                            pending.Clear();
+                            _snapshotReceivedItems = 0;
+                            _snapshotExpectedItems = evt.TotalCount ?? 0;
+#if NET6_0_OR_GREATER
+                            if (_snapshotExpectedItems > 0) devices.EnsureCapacity(_snapshotExpectedItems);
+#endif
+                            _currentSnapshotBatchId = evt.BatchId;
+                            _deviceSnapshotInProgress = true;
+                        }
+
+                        for (int i = 0; i < items.Length; i++)
+                            pending[items[i].deviceId] = items[i];
+
+                        _snapshotReceivedItems += items.Length;
+                        continue;
+                    }
+
+                    if (evt.Type is EventType.Added or EventType.Updated)
+                    {
+                        for (int i = 0; i < items.Length; i++)
+                            pending[items[i].deviceId] = items[i];
+                    }
+                    else if (evt.Type == EventType.Removed)
+                    {
+                        for (int i = 0; i < items.Length; i++)
+                        {
+                            pending.Remove(items[i].deviceId); // cancel any pending upsert
+                            devices.Remove(items[i].deviceId); // remove immediately on apply
+                        }
+                    }
+                }
+
+                // Nothing to apply this frame?
+                if (pending.Count == 0)
+                {
+                    // End-of-snapshot detection even if no new items this tick
+                    if (_deviceSnapshotInProgress &&
+                        _snapshotExpectedItems > 0 &&
+                        _snapshotReceivedItems >= _snapshotExpectedItems)
+                    {
+                        _deviceSnapshotInProgress = false;
+                        RebuildDeviceView();
+                        await InvokeAsync(StateHasChanged);
+                    }
+                    continue;
+                }
+
+                // Apply coalesced newest values
+                foreach (var kv in pending)
+                    devices[kv.Key] = kv.Value;
+
+                pending.Clear();
+
+                // Drop the gate if snapshot completed
+                if (_deviceSnapshotInProgress &&
+                    _snapshotExpectedItems > 0 &&
+                    _snapshotReceivedItems >= _snapshotExpectedItems)
+                {
+                    _deviceSnapshotInProgress = false;
+                    RebuildDeviceView();
+                    await InvokeAsync(StateHasChanged);
+                    continue;
+                }
+
+                // Regular frame render
+                RebuildDeviceView();
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch (OperationCanceledException) { /* normal shutdown */ }
+    }
+    // --------------------------------------------------
+
+    private void RebuildDeviceView()
+    {
+        // Stable order avoids churn in Virtualize diffing
+        deviceView = devices.Values.OrderBy(v => v.deviceId).ToList();
+    }
+
+    private void CoreSystemBatch(SignalREvent<CoreSystemStatusDto[]> evt)
+    {
+        var items = evt.Payload ?? Array.Empty<CoreSystemStatusDto>();
+        if (evt.Type is EventType.All or EventType.Added or EventType.Updated)
+            if (items.Length > 0) system = items[^1];
+
+        if (!_deviceSnapshotInProgress)
             _ = InvokeAsync(StateHasChanged);
-        }
-        catch (Exception ex)
+    }
+
+    private void ApiSystemBatch(SignalREvent<APISystemStatusDto[]> evt)
+    {
+        var items = evt.Payload ?? Array.Empty<APISystemStatusDto>();
+        if (evt.Type is EventType.All or EventType.Added or EventType.Updated)
+            if (items.Length > 0) Apisystem = items[^1];
+
+        if (!_deviceSnapshotInProgress)
+            _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void MissionBatch(SignalREvent<MissionDto[]> evt)
+    {
+        if (evt.Type == EventType.All) missions.Clear();
+
+        var items = evt.Payload ?? Array.Empty<MissionDto>();
+        foreach (var m in items)
         {
-            Console.Error.WriteLine(ex);
+            if (evt.Type == EventType.Removed) missions.Remove(m.id);
+            else missions[m.id] = m;
         }
+
+        if (!_deviceSnapshotInProgress)
+            _ = InvokeAsync(StateHasChanged);
+    }
+
+    private void PositionBatch(SignalREvent<PositionDto[]> evt)
+    {
+        if (evt.Type == EventType.All) robots.Clear();
+
+        var items = evt.Payload ?? Array.Empty<PositionDto>();
+        foreach (var p in items)
+        {
+            if (evt.Type == EventType.Removed) robots.Remove(p.RobotId);
+            else robots[p.RobotId] = p;
+        }
+
+        if (!_deviceSnapshotInProgress)
+            _ = InvokeAsync(StateHasChanged);
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_hubConnection is not null)
-            await _hubConnection.DisposeAsync();
+        try
+        {
+            _cts?.Cancel();
+
+            if (_hubConnection is not null && _hubConnection.State == HubConnectionState.Connected)
+            {
+                await _hubConnection.InvokeAsync("UnSubscribe", TopicNames.V1RobotPositions);
+                await _hubConnection.InvokeAsync("UnSubscribe", TopicNames.V1CoreStatus);
+                await _hubConnection.InvokeAsync("UnSubscribe", TopicNames.V1Devices);
+                await _hubConnection.InvokeAsync("UnSubscribe", TopicNames.V1ApiStatus);
+                await _hubConnection.InvokeAsync("UnSubscribe", TopicNames.V1Missions);
+                await _hubConnection.StopAsync();
+            }
+        }
+        finally
+        {
+            _posSub?.Dispose();
+            _sysSub?.Dispose();
+            _sysApiSub?.Dispose();
+            _devSub?.Dispose();
+            _missionsSub?.Dispose();
+            if (_hubConnection is not null) await _hubConnection.DisposeAsync();
+            _cts?.Dispose();
+        }
     }
 }

@@ -1,0 +1,22 @@
+﻿@using Model
+@* Renders only when its value timestamp moves forward *@
+<li>
+  <span>@Value.deviceId</span>
+  — <span>@Value.value</span>
+  <small style="opacity:.6"> @Value.TimestampUtc.ToLocalTime()</small>
+</li>
+
+@code {
+    [Parameter] public DeviceValueDto Value { get; set; } = default!;
+
+    private DateTimeOffset _lastRenderedTs;
+
+    protected override bool ShouldRender()
+    {
+        // Only re-render this row if the timestamp increased
+        var ts = Value.TimestampUtc;
+        if (ts <= _lastRenderedTs) return false;
+        _lastRenderedTs = ts;
+        return true;
+    }
+}
