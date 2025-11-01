@@ -1,159 +1,185 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.SignalR;
-using Microsoft.EntityFrameworkCore;
-using MoviesApp.Server.Data;
 using MoviesApp.Server.Hubs;
 using MoviesApp.Shared.DTOs;
-using MoviesApp.Shared.Models;
-
+using MoviesApp.Server.Protos;
 namespace MoviesApp.Server.Controllers
 {
     [ApiController]
     [Route("api/[controller]")]
     public class MoviesController : ControllerBase
     {
-        private readonly MoviesDbContext _context;
+        private readonly MoviesService.MoviesServiceClient _grpcClient;
         private readonly IHubContext<MovieHub> _hub;
+        private readonly ILogger<MoviesController> _logger;
 
-        public MoviesController(MoviesDbContext context, IHubContext<MovieHub> hub)
+        public MoviesController(
+            MoviesService.MoviesServiceClient grpcClient,
+            IHubContext<MovieHub> hub,
+            ILogger<MoviesController> logger)
         {
-            _context = context;
+            _grpcClient = grpcClient;
             _hub = hub;
+            _logger = logger;
         }
 
         [HttpGet]
         public async Task<ActionResult<IEnumerable<MovieDto>>> GetMovies()
         {
-            var movies = await _context.Movies
-                .Select(m => new MovieDto
+            try
+            {
+                var response = await _grpcClient.GetMoviesAsync(new GetMoviesRequest());
+
+                var movies = response.Movies.Select(m => new MovieDto
                 {
                     Id = m.Id,
                     Title = m.Title,
                     Genre = m.Genre,
-                    ReleaseDate = m.ReleaseDate,
+                    ReleaseDate = DateTime.Parse(m.ReleaseDate),
                     BoxOfficeSales = m.BoxOfficeSales
-                })
-                .ToListAsync();
+                }).ToList();
 
-            return Ok(movies);
+                return Ok(movies);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error getting movies");
+                return StatusCode(500, "Internal server error");
+            }
         }
 
         [HttpGet("{id}")]
         public async Task<ActionResult<MovieDto>> GetMovie(int id)
         {
-            var movie = await _context.Movies.FindAsync(id);
-
-            if (movie == null)
+            try
             {
-                return NotFound();
+                var response = await _grpcClient.GetMovieAsync(new GetMovieRequest { Id = id });
+
+                if (!response.Found)
+                {
+                    return NotFound();
+                }
+
+                var movieDto = new MovieDto
+                {
+                    Id = response.Movie.Id,
+                    Title = response.Movie.Title,
+                    Genre = response.Movie.Genre,
+                    ReleaseDate = DateTime.Parse(response.Movie.ReleaseDate),
+                    BoxOfficeSales = response.Movie.BoxOfficeSales
+                };
+
+                return Ok(movieDto);
             }
-
-            var movieDto = new MovieDto
+            catch (Exception ex)
             {
-                Id = movie.Id,
-                Title = movie.Title,
-                Genre = movie.Genre,
-                ReleaseDate = movie.ReleaseDate,
-                BoxOfficeSales = movie.BoxOfficeSales
-            };
-
-            return Ok(movieDto);
+                _logger.LogError(ex, "Error getting movie with id {Id}", id);
+                return StatusCode(500, "Internal server error");
+            }
         }
 
         [HttpPost]
         public async Task<ActionResult<MovieDto>> CreateMovie(CreateMovieDto createMovieDto)
         {
-            var movie = new Movie
+            try
             {
-                Title = createMovieDto.Title,
-                Genre = createMovieDto.Genre,
-                ReleaseDate = createMovieDto.ReleaseDate,
-                BoxOfficeSales = createMovieDto.BoxOfficeSales
-            };
+                var request = new CreateMovieRequest
+                {
+                    Title = createMovieDto.Title,
+                    Genre = createMovieDto.Genre,
+                    ReleaseDate = createMovieDto.ReleaseDate.ToString("yyyy-MM-dd"),
+                    BoxOfficeSales = createMovieDto.BoxOfficeSales
+                };
 
-            _context.Movies.Add(movie);
-            await _context.SaveChangesAsync();
+                var response = await _grpcClient.CreateMovieAsync(request);
 
-            var movieDto = new MovieDto
+                var movieDto = new MovieDto
+                {
+                    Id = response.Movie.Id,
+                    Title = response.Movie.Title,
+                    Genre = response.Movie.Genre,
+                    ReleaseDate = DateTime.Parse(response.Movie.ReleaseDate),
+                    BoxOfficeSales = response.Movie.BoxOfficeSales
+                };
+
+
+                // Also send via SignalR
+                await _hub.Clients.All.SendAsync("MovieCreated", movieDto);
+
+                return CreatedAtAction(nameof(GetMovie), new { id = movieDto.Id }, movieDto);
+            }
+            catch (Exception ex)
             {
-                Id = movie.Id,
-                Title = movie.Title,
-                Genre = movie.Genre,
-                ReleaseDate = movie.ReleaseDate,
-                BoxOfficeSales = movie.BoxOfficeSales
-            };
-            await _hub.Clients.All.SendAsync("MovieCreated", new MovieDto
-            {
-                Id = movie.Id,
-                Title = movie.Title,
-                Genre = movie.Genre,
-                ReleaseDate = movie.ReleaseDate,
-                BoxOfficeSales = movie.BoxOfficeSales
-            });
-
-            return CreatedAtAction(nameof(GetMovie), new { id = movie.Id }, movieDto);
+                _logger.LogError(ex, "Error creating movie");
+                return StatusCode(500, "Internal server error");
+            }
         }
+
         [HttpPut("{id}")]
         public async Task<IActionResult> UpdateMovie(int id, UpdateMovieDto updateMovieDto)
         {
-            var movie = await _context.Movies.FindAsync(id);
-
-            if (movie == null)
-            {
-                return NotFound();
-            }
-
-            movie.Title = updateMovieDto.Title;
-            movie.Genre = updateMovieDto.Genre;
-            movie.ReleaseDate = updateMovieDto.ReleaseDate;
-            movie.BoxOfficeSales = updateMovieDto.BoxOfficeSales;
-
             try
             {
-                await _context.SaveChangesAsync();
-            }
-            catch (DbUpdateConcurrencyException)
-            {
-                if (!MovieExists(id))
+                var request = new UpdateMovieRequest
+                {
+                    Id = id,
+                    Title = updateMovieDto.Title,
+                    Genre = updateMovieDto.Genre,
+                    ReleaseDate = updateMovieDto.ReleaseDate.ToString("yyyy-MM-dd"),
+                    BoxOfficeSales = updateMovieDto.BoxOfficeSales
+                };
+
+                var response = await _grpcClient.UpdateMovieAsync(request);
+
+                if (!response.Found)
                 {
                     return NotFound();
                 }
-                throw;
+
+                var movieDto = new MovieDto
+                {
+                    Id = response.Movie.Id,
+                    Title = response.Movie.Title,
+                    Genre = response.Movie.Genre,
+                    ReleaseDate = DateTime.Parse(response.Movie.ReleaseDate),
+                    BoxOfficeSales = response.Movie.BoxOfficeSales
+                };
+
+
+                // Also send via SignalR
+                await _hub.Clients.All.SendAsync("MovieUpdated", movieDto);
+
+                return NoContent();
             }
-
-            var movieDto = new MovieDto
+            catch (Exception ex)
             {
-                Id = movie.Id,
-                Title = movie.Title,
-                Genre = movie.Genre,
-                ReleaseDate = movie.ReleaseDate,
-                BoxOfficeSales = movie.BoxOfficeSales
-            };
-
-            await _hub.Clients.All.SendAsync("MovieUpdated", movieDto);
-
-            return NoContent();
+                _logger.LogError(ex, "Error updating movie with id {Id}", id);
+                return StatusCode(500, "Internal server error");
+            }
         }
 
         [HttpDelete("{id}")]
         public async Task<IActionResult> DeleteMovie(int id)
         {
-            var movie = await _context.Movies.FindAsync(id);
-
-            if (movie == null)
+            try
             {
-                return NotFound();
+                var response = await _grpcClient.DeleteMovieAsync(new DeleteMovieRequest { Id = id });
+
+                if (!response.Found)
+                {
+                    return NotFound();
+                }
+
+                // Send via SignalR
+                await _hub.Clients.All.SendAsync("MovieDeleted", id);
+
+                return NoContent();
             }
-
-            _context.Movies.Remove(movie);
-            await _context.SaveChangesAsync();
-            await _hub.Clients.All.SendAsync("MovieDeleted", id);
-            return NoContent();
-        }
-
-        private bool MovieExists(int id)
-        {
-            return _context.Movies.Any(e => e.Id == id);
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error deleting movie with id {Id}", id);
+                return StatusCode(500, "Internal server error");
+            }
         }
     }
 }

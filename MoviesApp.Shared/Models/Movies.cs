@@ -18,6 +18,6 @@ namespace MoviesApp.Shared.Models
         public DateTime ReleaseDate { get; set; } = DateTime.Today;
 
         [Range(0, double.MaxValue, ErrorMessage = "Box office sales must be positive")]
-        public decimal? BoxOfficeSales { get; set; }
+        public string? BoxOfficeSales { get; set; }
     }
 }

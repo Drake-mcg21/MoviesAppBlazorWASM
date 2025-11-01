@@ -126,7 +126,7 @@ else
             Title = movie.Title,
             Genre = movie.Genre,
             ReleaseDate = movie.ReleaseDate,
-            BoxOfficeSales = movie.BoxOfficeSales
+            BoxOfficeSales = movie.BoxOfficeSales?.ToString()
         };
 
         var success = await MovieService.UpdateMovieAsync(Id, updateDto);

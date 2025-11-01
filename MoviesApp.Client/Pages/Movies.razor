@@ -46,7 +46,7 @@
                                     <td>@movie.Title</td>
                                     <td>@movie.Genre</td>
                                     <td>@movie.ReleaseDate.ToString("MMM dd, yyyy")</td>
-                                    <td>@(movie.BoxOfficeSales?.ToString("C", System.Globalization.CultureInfo.GetCultureInfo("en-US")) ?? "N/A")</td>
+                                    <td>@(movie.BoxOfficeSales)</td>
                                     <td>
                                         <div class="btn-group" role="group">
                                             <button class="btn btn-sm btn-outline-primary"

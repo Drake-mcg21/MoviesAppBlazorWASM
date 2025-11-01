@@ -1,0 +1,70 @@
+syntax = "proto3";
+option csharp_namespace = "MoviesApp.Server.Protos";
+package movies;
+
+// The Movies service definition
+service MoviesService {
+  rpc GetMovies (GetMoviesRequest) returns (GetMoviesResponse);
+  rpc GetMovie (GetMovieRequest) returns (GetMovieResponse);
+  rpc CreateMovie (CreateMovieRequest) returns (CreateMovieResponse);
+  rpc UpdateMovie (UpdateMovieRequest) returns (UpdateMovieResponse);
+  rpc DeleteMovie (DeleteMovieRequest) returns (DeleteMovieResponse);
+}
+
+// Request/Response messages
+message GetMoviesRequest {
+  // Empty for now, but could add filtering/pagination later
+}
+
+message GetMoviesResponse {
+  repeated MovieMessage movies = 1;
+}
+
+message GetMovieRequest {
+  int32 id = 1;
+}
+
+message GetMovieResponse {
+  MovieMessage movie = 1;
+  bool found = 2;
+}
+
+message CreateMovieRequest {
+  string title = 1;
+  string genre = 2;
+  string release_date = 3; // ISO 8601 string format
+  string box_office_sales = 4; // String to handle decimal precision
+}
+
+message CreateMovieResponse {
+  MovieMessage movie = 1;
+}
+
+message UpdateMovieRequest {
+  int32 id = 1;
+  string title = 2;
+  string genre = 3;
+  string release_date = 4;
+  string box_office_sales = 5;
+}
+
+message UpdateMovieResponse {
+  MovieMessage movie = 1;
+  bool found = 2;
+}
+
+message DeleteMovieRequest {
+  int32 id = 1;
+}
+
+message DeleteMovieResponse {
+  bool found = 2;
+}
+
+message MovieMessage {
+  int32 id = 1;
+  string title = 2;
+  string genre = 3;
+  string release_date = 4;
+  string box_office_sales = 5; // String to handle decimal precision
+}
